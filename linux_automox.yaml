@@ -1,0 +1,87 @@
+---
+- name: Install and configure Automox on Linux
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - vars/automox.yaml
+
+  vars:
+    automox_policy_group: "{{ policy_group | default('staging') }}"
+    automox_service_name: "amagent"
+
+    automox_accesskey_secret_name: >-
+      {{
+        'automox-accesskey-sandbox'
+        if automox_policy_group in ['staging', 'local']
+        else 'automox-accesskey'
+      }}
+
+    automox_curl_package: >-
+      {{
+        automox_curl_package_name['Amazon']['2023']
+        if ansible_distribution == 'Amazon' and ansible_distribution_major_version == '2023'
+        else automox_curl_package_name['default']
+      }}
+
+  tasks:
+    - name: Ensure Automox access key was provided by AAP credential
+      ansible.builtin.assert:
+        that:
+          - automox_accesskey is defined
+          - automox_accesskey | length > 0
+        fail_msg: "automox_accesskey was not provided by the attached AAP credential."
+      no_log: true
+
+    - name: Gather installed package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: End host if Automox agent is already installed
+      ansible.builtin.meta: end_host
+      when: "'amagent' in ansible_facts.packages"
+
+    - name: Reset machine-id
+      ansible.builtin.shell: |
+        rm -f /etc/machine-id
+        systemd-machine-id-setup
+      args:
+        executable: /bin/bash
+
+    - name: Ensure curl is installed
+      ansible.builtin.package:
+        name: "{{ automox_curl_package }}"
+        state: present
+
+    - name: Update apt cache on Debian family when aptitude is missing
+      ansible.builtin.apt:
+        update_cache: true
+      when:
+        - ansible_os_family == "Debian"
+        - "'aptitude' not in ansible_facts.packages"
+
+    - name: Ensure aptitude is installed on Debian family
+      ansible.builtin.package:
+        name: aptitude
+        state: present
+      when:
+        - ansible_os_family == "Debian"
+        - "'aptitude' not in ansible_facts.packages"
+
+    - name: Install Automox agent on Linux
+      ansible.builtin.shell: |
+        curl -sS --tlsv1.2 "{{ automox_remote_installer }}{{ automox_accesskey }}" | bash
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Ensure Automox service is started
+      ansible.builtin.service:
+        name: "{{ automox_service_name }}"
+        state: started
+
+    - name: Wait for Automox agent on local policy group
+      ansible.builtin.pause:
+        seconds: 20
+      when: automox_policy_group == "local"
