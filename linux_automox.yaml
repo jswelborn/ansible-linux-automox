@@ -10,20 +10,7 @@
   vars:
     automox_policy_group: "{{ policy_group | default('staging') }}"
     automox_service_name: "amagent"
-
-    automox_accesskey_secret_name: >-
-      {{
-        'automox-accesskey-sandbox'
-        if automox_policy_group in ['staging', 'local']
-        else 'automox-accesskey'
-      }}
-
-    automox_curl_package: >-
-      {{
-        automox_curl_package_name['Amazon']['2023']
-        if ansible_distribution == 'Amazon' and ansible_distribution_major_version == '2023'
-        else automox_curl_package_name['default']
-      }}
+    automox_curl_package: "curl"
 
   tasks:
     - name: Ensure Automox access key was provided by AAP credential
