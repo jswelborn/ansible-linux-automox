@@ -61,7 +61,7 @@
         curl -sS --tlsv1.2 "{{ automox_remote_installer }}{{ automox_accesskey }}" | bash
       args:
         executable: /bin/bash
-      no_log: true
+      no_log: false
 
     - name: Ensure Automox service is started
       ansible.builtin.service:
