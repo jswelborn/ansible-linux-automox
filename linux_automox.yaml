@@ -11,6 +11,8 @@
     automox_policy_group: "{{ policy_group | default('staging') }}"
     automox_service_name: "amagent"
     automox_curl_package: "curl"
+    automox_install_retries: 3
+    automox_install_delay: 30
 
   tasks:
     - name: Ensure Automox access key was provided by AAP credential
@@ -58,10 +60,15 @@
 
     - name: Install Automox agent on Linux
       ansible.builtin.shell: |
+        set -o pipefail
         curl -sS --tlsv1.2 "{{ automox_remote_installer }}{{ automox_accesskey }}" | bash
       args:
         executable: /bin/bash
-      no_log: false
+      register: automox_install_result
+      retries: "{{ automox_install_retries }}"
+      delay: "{{ automox_install_delay }}"
+      until: automox_install_result.rc == 0
+      no_log: true
 
     - name: Ensure Automox service is started
       ansible.builtin.service:
