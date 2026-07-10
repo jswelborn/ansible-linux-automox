@@ -38,10 +38,18 @@
       args:
         executable: /bin/bash
 
-    - name: Ensure curl is installed
+    - name: Check whether curl command is available
+      ansible.builtin.command:
+        cmd: curl --version
+      register: automox_curl_check
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure curl is installed when unavailable
       ansible.builtin.package:
         name: "{{ automox_curl_package }}"
         state: present
+      when: automox_curl_check.rc != 0
 
     - name: Update apt cache on Debian family when aptitude is missing
       ansible.builtin.apt:
