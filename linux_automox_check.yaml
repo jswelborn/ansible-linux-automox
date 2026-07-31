@@ -6,6 +6,7 @@
 
   vars:
     service_name: amagent.service
+    automox_startup_wait: 5
 
   tasks:
     - name: Gather service facts
@@ -22,11 +23,18 @@
         msg: "Automox Agent service is missing"
       when: service_name not in ansible_facts.services
 
-    - name: Start and enable Automox Agent service when it is stopped
+    - name: Restart and enable Automox Agent service when it is not running
       ansible.builtin.systemd_service:
         name: "{{ service_name }}"
-        state: started
+        state: restarted
         enabled: true
+      when:
+        - service_name in ansible_facts.services
+        - ansible_facts.services[service_name].state != "running"
+
+    - name: Wait for Automox Agent to initialize
+      ansible.builtin.pause:
+        seconds: "{{ automox_startup_wait }}"
       when:
         - service_name in ansible_facts.services
         - ansible_facts.services[service_name].state != "running"
@@ -42,7 +50,10 @@
 
     - name: Fail if Automox Agent service is still not running
       ansible.builtin.fail:
-        msg: "Automox Agent service exists but could not be started"
+        msg: >-
+          Automox Agent service exists but could not be restarted.
+          Review systemctl status {{ service_name }} and
+          journalctl -u {{ service_name }}.
       when:
         - service_name in ansible_facts.services
         - ansible_facts.services[service_name].state != "running"
