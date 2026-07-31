@@ -9,8 +9,9 @@
 
   vars:
     automox_policy_group: "{{ policy_group | default('staging') }}"
-    automox_service_name: "amagent"
-    automox_curl_package: "curl"
+    automox_package_name: amagent
+    automox_service_name: amagent.service
+    automox_curl_package: curl
     automox_install_retries: 3
     automox_install_delay: 30
 
@@ -20,70 +21,218 @@
         that:
           - automox_accesskey is defined
           - automox_accesskey | length > 0
-        fail_msg: "automox_accesskey was not provided by the attached AAP credential."
+        fail_msg: >-
+          automox_accesskey was not provided by the attached AAP credential.
       no_log: true
 
     - name: Gather installed package facts
       ansible.builtin.package_facts:
         manager: auto
 
-    - name: End host if Automox agent is already installed
-      ansible.builtin.meta: end_host
-      when: "'amagent' in ansible_facts.packages"
+    - name: Record whether Automox was already installed
+      ansible.builtin.set_fact:
+        automox_was_installed: >-
+          {{ automox_package_name in ansible_facts.packages }}
 
-    - name: Reset machine-id
-      ansible.builtin.shell: |
-        rm -f /etc/machine-id
-        systemd-machine-id-setup
-      args:
-        executable: /bin/bash
+    - name: Install Automox when it is not already installed
+      when: not automox_was_installed | bool
+      block:
+        - name: Reset machine-id
+          ansible.builtin.shell: |
+            rm -f /etc/machine-id
+            systemd-machine-id-setup
+          args:
+            executable: /bin/bash
 
-    - name: Check whether curl command is available
-      ansible.builtin.command:
-        cmd: curl --version
-      register: automox_curl_check
-      changed_when: false
-      failed_when: false
+        - name: Check whether curl command is available
+          ansible.builtin.command:
+            cmd: curl --version
+          register: automox_curl_check
+          changed_when: false
+          failed_when: false
 
-    - name: Ensure curl is installed when unavailable
-      ansible.builtin.package:
-        name: "{{ automox_curl_package }}"
-        state: present
-      when: automox_curl_check.rc != 0
+        - name: Ensure curl is installed when unavailable
+          ansible.builtin.package:
+            name: "{{ automox_curl_package }}"
+            state: present
+          when: automox_curl_check.rc != 0
 
-    - name: Update apt cache on Debian family when aptitude is missing
-      ansible.builtin.apt:
-        update_cache: true
+        - name: Update apt cache on Debian family when aptitude is missing
+          ansible.builtin.apt:
+            update_cache: true
+          when:
+            - ansible_os_family == "Debian"
+            - "'aptitude' not in ansible_facts.packages"
+
+        - name: Ensure aptitude is installed on Debian family
+          ansible.builtin.package:
+            name: aptitude
+            state: present
+          when:
+            - ansible_os_family == "Debian"
+            - "'aptitude' not in ansible_facts.packages"
+
+        - name: Install Automox agent on Linux
+          ansible.builtin.shell: |
+            set -o pipefail
+            curl -sS --tlsv1.2 \
+              "{{ automox_remote_installer }}{{ automox_accesskey }}" |
+              bash
+          args:
+            executable: /bin/bash
+          register: automox_install_result
+          retries: "{{ automox_install_retries }}"
+          delay: "{{ automox_install_delay }}"
+          until: automox_install_result.rc == 0
+          no_log: true
+
+    - name: Wait for Automox service registration
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Gather Automox service facts
+      ansible.builtin.service_facts:
+
+    - name: Fail if Automox service was not installed
+      ansible.builtin.fail:
+        msg: >-
+          Automox installation completed, but {{ automox_service_name }}
+          was not found.
+      when: automox_service_name not in ansible_facts.services
+
+    - name: Restart and enable Automox when it is not running
+      ansible.builtin.systemd_service:
+        name: "{{ automox_service_name }}"
+        state: restarted
+        enabled: true
       when:
-        - ansible_os_family == "Debian"
-        - "'aptitude' not in ansible_facts.packages"
+        - automox_service_name in ansible_facts.services
+        - ansible_facts.services[automox_service_name].state != "running"
 
-    - name: Ensure aptitude is installed on Debian family
-      ansible.builtin.package:
-        name: aptitude
-        state: present
-      when:
-        - ansible_os_family == "Debian"
-        - "'aptitude' not in ansible_facts.packages"
-
-    - name: Install Automox agent on Linux
-      ansible.builtin.shell: |
-        set -o pipefail
-        curl -sS --tlsv1.2 "{{ automox_remote_installer }}{{ automox_accesskey }}" | bash
-      args:
-        executable: /bin/bash
-      register: automox_install_result
-      retries: "{{ automox_install_retries }}"
-      delay: "{{ automox_install_delay }}"
-      until: automox_install_result.rc == 0
-      no_log: true
-
-    - name: Ensure Automox service is started
-      ansible.builtin.service:
+    - name: Ensure running Automox service is enabled
+      ansible.builtin.systemd_service:
         name: "{{ automox_service_name }}"
         state: started
+        enabled: true
+      when:
+        - automox_service_name in ansible_facts.services
+        - ansible_facts.services[automox_service_name].state == "running"
+
+    - name: Wait for Automox agent to stabilize
+      ansible.builtin.pause:
+        seconds: 5
 
     - name: Wait for Automox agent on local policy group
       ansible.builtin.pause:
         seconds: 20
       when: automox_policy_group == "local"
+
+    - name: Check Automox systemd substate
+      ansible.builtin.command:
+        cmd: >-
+          systemctl show
+          --property=SubState
+          --value
+          {{ automox_service_name }}
+      register: automox_service_status
+      changed_when: false
+      failed_when: automox_service_status.stdout | trim != "running"
+
+    - name: Show Automox service status
+      ansible.builtin.debug:
+        msg: >-
+          {{ automox_service_name }} substate is
+          {{ automox_service_status.stdout | trim }}
+
+    # Bootstrap audit
+
+    - name: Refresh installed package facts for audit
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Refresh service facts for audit
+      ansible.builtin.service_facts:
+
+    - name: Ensure bootstrap asset audit directory exists
+      ansible.builtin.file:
+        path: /etc/hts/bootstrap/assets
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Build Automox bootstrap audit data
+      ansible.builtin.set_fact:
+        automox_bootstrap_audit:
+          asset: automox
+          status: successful
+          package: "{{ automox_package_name }}"
+          version: >-
+            {{
+              (
+                ansible_facts.packages[automox_package_name]
+                | first
+              ).version
+              if automox_package_name in ansible_facts.packages
+              else 'not installed'
+            }}
+          service: "{{ automox_service_name }}"
+          service_state: >-
+            {{
+              ansible_facts.services[automox_service_name].state
+              if automox_service_name in ansible_facts.services
+              else 'not found'
+            }}
+          service_status: "{{ automox_service_status.stdout | trim }}"
+          job_template: >-
+            {{
+              awx_job_template_name
+              | default(
+                  tower_job_template_name
+                  | default('unknown')
+                )
+            }}
+          job_id: >-
+            {{
+              awx_job_id
+              | default(
+                  tower_job_id
+                  | default('unknown')
+                )
+            }}
+          workflow_job_id: >-
+            {{
+              awx_workflow_job_id
+              | default(
+                  tower_workflow_job_id
+                  | default('unknown')
+                )
+            }}
+          project_revision: >-
+            {{
+              awx_project_revision
+              | default(
+                  tower_project_revision
+                  | default('unknown')
+                )
+            }}
+          inventory_hostname: "{{ inventory_hostname }}"
+          completed: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+    - name: Record Automox bootstrap asset
+      ansible.builtin.copy:
+        dest: /etc/hts/bootstrap/assets/automox.json
+        content: >-
+          {{
+            automox_bootstrap_audit
+            | ansible.builtin.to_nice_json
+          }}
+
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate Automox bootstrap audit JSON
+      ansible.builtin.command:
+        cmd: python3 -m json.tool /etc/hts/bootstrap/assets/automox.json
+      changed_when: false
